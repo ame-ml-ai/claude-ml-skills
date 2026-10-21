@@ -90,6 +90,13 @@ A demo can run without errors and still show nothing. Before you trust the numbe
 - Design the data so the paper's claim can show up, and also fail. For example, plant a known structure (a rank-4 shift for a low-rank method) and include a setting that should do worse (rank 1).
 - Check the loss at step 0. For classification it should be close to $\ln(\text{num classes})$. If it is far off, look for an initialization or scaling bug before you tune anything else.
 - If the paper leaves an initialization unspecified, pick one that keeps activations at unit scale, and mark it as an assumption.
+- Where you can, build the toy so the right answer is known: a planted structure (the exact low-rank update), a closed-form optimum (an exact KL-regularised policy), a known alignment. Then measure the distance to it, not only the loss. "The method recovers the planted ΔW to 4%" says much more than "the loss went down".
+- Add a negative control: a setting where the paper's assumption is false (a full-rank shift for a low-rank method). The method should lose there. If it wins everywhere, the toy is probably rigged.
+
+### Compare fairly
+- Give every method, including the baseline, its own learning rate from a small grid (3 values is enough), picked on a validation split. Use the test split once, for the final numbers.
+- Report mean ± std over at least 3 seeds when two methods are close. Say what the seed changes (init, batch order, data).
+- If an ablation of the paper's key trick is cheap, run it and report what breaks, including negative results ("removing 1/√d_k changes nothing at d_k = 16"). If ablations push the run past the time budget, put them behind a `--ablate` flag and give its run time.
 
 ### Style
 - Name variables and functions after the paper's notation where it helps (`q`, `k`, `v`, `alpha`, `beta`), otherwise use clear English names.
@@ -99,19 +106,19 @@ A demo can run without errors and still show nothing. Before you trust the numbe
 ### Comments — important
 - Add comments **very rarely**. The code and the breakdown above already explain things; most lines need no comment.
 - Only comment where something is genuinely non-obvious: a tensor shape at a key step, a paper trick, a sign or index that looks wrong but isn't.
-- When you do comment, keep it to a few words and **start with a lowercase letter**, in this style:
+- When you do comment, keep it to a few words, put one space after `#` (PEP 8) and **start with a lowercase letter**, in this style:
 
 ```python
-#train set
+# train set
 x_train, y_train = make_data(1000)
 
-#main code
+# main code
 for step in range(steps):
     ...
 ```
 
 - No docstrings, no section banners, no comments that restate what the code says (`# loop over epochs`, `# return the result`).
-- Never write comments that start with a capital letter. This includes paper symbols that are capitals: write `#zero B, so the model starts at W0`, not `#B is zero ...`.
+- Never write comments that start with a capital letter. This includes paper symbols that are capitals: write `# zero B, so the model starts at W0`, not `# B is zero ...`.
 - As a rough guide, about one comment per 20–30 lines of code. Before you finish, grep the file for comments and delete any that the code already says.
 
 ### Tests
@@ -199,12 +206,12 @@ README style: short paragraphs, plenty of whitespace, headings that scan well, n
 
 - `python main.py` runs from a fresh clone with only `requirements.txt` installed.
 - All README links work (paper, badges, images).
-- The comment rules from Step 4 still hold in the final code.
+- The comment rules from Step 4 still hold in the final code, and `ruff check` passes.
 
 ## Honesty rules
 
 - Do not invent equations, hyperparameters or results. If the paper does not specify something you needed, choose a reasonable value and mark it as your assumption in "Simplifications".
-- If part of the paper is ambiguous or seems inconsistent, say so instead of smoothing it over.
+- If part of the paper is ambiguous or seems inconsistent (an equation that drops a factor the text mentions, two sections that disagree on a definition), say so in Gotchas instead of smoothing it over, and say which reading the code uses.
 - Separate what the paper says from your own interpretation.
 
 ## Modes
