@@ -1,69 +1,72 @@
+**English** | [Русский](breakdown.ru.md)
+
 # LoRA: Low-Rank Adaptation of Large Language Models
 
-**Статья:** Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen (Microsoft). [arXiv:2106.09685](https://arxiv.org/abs/2106.09685), v1 от 17.06.2021, прочитана версия v2 от 16.10.2021 (HTML).
-**Код:** [`main.py`](main.py)
+**Paper:** Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen (Microsoft). [arXiv:2106.09685](https://arxiv.org/abs/2106.09685), v1 17 Jun 2021. Read: v2, 16 Oct 2021 (PDF and HTML, including §7 and Appendix G).
+**Code:** [`main.py`](main.py)
 
 ## TL;DR
 
-Дообучать (fine-tuning) все веса огромной модели под каждую задачу дорого: каждая задача требует копию всех параметров. LoRA замораживает предобученные веса $W_0$ и учит только поправку низкого ранга $\Delta W = BA$. Обучаемых параметров становится в тысячи раз меньше. После обучения $BA$ можно прибавить к $W_0$, и модель работает без дополнительной задержки. На GPT-3 175B качество получается на уровне полного дообучения или выше (Таблица 4).
+Full fine-tuning stores a copy of every weight for every task. LoRA freezes the pretrained weights $W_0$ and learns only a low-rank update $\Delta W = BA$, which cuts trainable parameters by orders of magnitude. After training, $BA$ is added into $W_0$, so inference costs nothing extra. On GPT-3 175B it matches or beats full fine-tuning (Table 4).
 
-## Проблема
+## Problem
 
-При полном дообучении изменение весов $\Delta\Phi$ имеет столько же параметров, сколько вся модель ($|\Delta\Phi| = |\Phi_0|$, раздел 2). Для GPT-3 это 175 млрд параметров на каждую задачу. Адаптеры (adapters) добавляют слои и увеличивают задержку при выводе (inference), а prefix-tuning занимает часть длины контекста и плохо оптимизируется (раздел 3).
+With full fine-tuning the update $\Delta\Phi$ is as large as the model, $|\Delta\Phi| = |\Phi_0|$ (§2): 175B parameters per task for GPT-3. Adapters add sequential layers and inference latency; prefix tuning eats part of the context window and is hard to optimise (§3).
 
-## Основная идея
+## Core idea
 
-Авторы предполагают, что изменение весов при дообучении имеет низкий «внутренний ранг» (intrinsic rank): чтобы перейти к новой задаче, весам достаточно сдвинуться в маленьком подпространстве. Поэтому вместо полной матрицы $\Delta W$ размера $d \times k$ учатся две узкие матрицы $B$ ($d \times r$) и $A$ ($r \times k$) с $r \ll \min(d, k)$.
+The authors hypothesise that the weight change needed to adapt to a new task has a low *intrinsic rank*: the weights only need to move inside a small subspace. So instead of a full $d \times k$ matrix $\Delta W$, LoRA learns two thin matrices $B$ ($d \times r$) and $A$ ($r \times k$) with $r \ll \min(d, k)$.
 
-Аналогия: не переписывать всю книгу заново, а вклеить короткий список поправок, который потом можно «впечатать» в текст.
+**Difference from the baseline:** full fine-tuning updates $W$ itself. LoRA keeps $W_0$ frozen and trains only $B$ and $A$, which sit next to it.
 
-**Отличие от базового подхода:** полное дообучение обновляет $W$ целиком. LoRA оставляет $W_0$ замороженной и обучает только $B$ и $A$, которые параллельны ей.
+## Key equations
 
-## Ключевые уравнения
-
-**1. Прямой проход с LoRA** (раздел 4.1, уравнение 3, плюс масштаб $\alpha/r$ из того же раздела):
+**1. Forward pass** (§4.1, Eq. 3, plus the $\alpha/r$ scale from the text right after it):
 
 $$h = W_0 x + \frac{\alpha}{r} B A x$$
 
-- $x \in \mathbb{R}^{k}$ — вход слоя (в коде батч $x \in \mathbb{R}^{N \times k}$)
-- $W_0 \in \mathbb{R}^{d \times k}$ — замороженные предобученные веса
-- $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$ — обучаемые матрицы, $r$ — ранг
-- $\alpha$ — константа; авторы берут $\alpha$ равным первому испробованному $r$ и не настраивают его
-- код: `LoRALinear.forward`, строка `self.base(x) + self.scaling * (x @ self.A.T) @ self.B.T`
+- $x \in \mathbb{R}^{k}$ is the layer input (a batch $x \in \mathbb{R}^{N \times k}$ in the code)
+- $W_0 \in \mathbb{R}^{d \times k}$ frozen, $B \in \mathbb{R}^{d \times r}$ and $A \in \mathbb{R}^{r \times k}$ trainable
+- $\alpha$ is a constant: "we simply set α to the first r we try and do not tune it"
+- code: `LoRALinear.forward`
 
-> В уравнении 3 множителя $\alpha/r$ нет, но в тексте сразу после него сказано: «We then scale $\Delta W x$ by $\alpha/r$». В коде множитель есть.
+> Eq. 3 itself has no $\alpha/r$. The sentence after it does: "We then scale ∆Wx by α/r". The code includes it.
 
-**2. Инициализация** (раздел 4.1): $A \sim \mathcal{N}(0, \sigma^2)$, $B = 0$, поэтому $\Delta W = BA = 0$ в начале обучения.
-- код: `LoRALinear.__init__`
+**2. Initialisation** (§4.1): "random Gaussian initialization for A and zero for B, so ∆W = BA is zero at the beginning of training".
+- code: `LoRALinear.__init__`
 
-**3. Слияние для вывода** (раздел 4.1, «No Additional Inference Latency»):
+**3. Merge for inference** (§4.1, "No Additional Inference Latency"): $W = W_0 + \frac{\alpha}{r} B A$.
+- code: `LoRALinear.merge`, `LoRALinear.delta_w`
 
-$$W = W_0 + \frac{\alpha}{r} B A$$
+**4. Normalised subspace similarity** (§7.2, Eq. 4; Appendix G):
 
-- код: `LoRALinear.merge`, `LoRALinear.delta_w`
+$$\phi(A_1, A_2, i, j) = \frac{\lVert U_{A_1}^{i\top} U_{A_2}^{j} \rVert_F^2}{\min(i, j)} \in [0, 1]$$
 
-**4. Число обучаемых параметров** (раздел 5.1): $|\Theta| = 2 \times \hat{L}_{LoRA} \times d_{model} \times r$ для квадратных матриц $d_{model} \times d_{model}$. Для прямоугольного слоя $d \times k$ это $r(d + k)$ вместо $dk$.
-- код: `n_trainable`
+- $U^i$ holds the top $i$ singular vectors; 1 means one subspace contains the other, 0 means they are orthogonal
+- the paper uses it to show that the top directions learned with $r=8$ and $r=64$ overlap while the rest look like noise
+- code: `subspace_similarity`, applied to the learned $\Delta W$ and the planted $\Delta W^*$
 
-## Как это работает по шагам
+## How it works step by step
 
-1. Берём предобученную модель (в коде MLP, обученную на задаче A, функция `train`).
-2. Замораживаем все её параметры (`add_lora`, `requires_grad_(False)`).
-3. Оборачиваем выбранные линейные слои в `LoRALinear`: рядом с $W_0$ появляются $A$ (гауссова) и $B$ (нули).
-4. Прямой проход: $h = W_0 x + \frac{\alpha}{r} B(Ax)$. Сначала $x$ проецируется в $r$-мерное пространство через $A$, потом обратно через $B$. Матрицу $BA$ размера $d \times k$ при обучении явно не строим.
-5. В начале обучения $B = 0$, поэтому модель выдаёт ровно то же, что предобученная.
-6. Градиенты считаются только по $A$ и $B$, оптимизатор (Adam) видит только их.
-7. После обучения `merge()` складывает $W_0 + \frac{\alpha}{r}BA$ в обычный `nn.Linear`. Выход совпадает, а задержки нет.
+1. Take a pretrained model (here an MLP, `teacher_a`).
+2. Freeze all of its parameters (`add_lora`).
+3. Wrap the chosen linear layers in `LoRALinear`: next to $W_0$ there is now $A$ (Gaussian) and $B$ (zeros).
+4. Forward: $h = W_0 x + \frac{\alpha}{r} B(Ax)$. The input is projected to $r$ dimensions and back. The $d \times k$ matrix $BA$ is never formed during training.
+5. Because $B = 0$, the model starts exactly at the pretrained one.
+6. Gradients flow only to $A$ and $B$; the optimiser sees only them.
+7. After training, `merge()` folds $W_0 + \frac{\alpha}{r}BA$ into a plain `nn.Linear`.
 
-## Реализация
+## Implementation
 
-Игрушечная постановка: «учитель» A — случайная MLP $32 \to 128 \to 128 \to 8$. «Учитель» B — тот же учитель A, у которого к весам первых двух слоёв прибавлен сдвиг **ранга 4**. Мы:
+### Setup
 
-1. предобучаем студента на задаче A (2000 шагов);
-2. адаптируем его к задаче B, имея 1000 примеров: (а) полным дообучением, (б) LoRA с $r = 1, 2, 4, 8$ на слоях `fc1` и `fc2`;
-3. сравниваем ошибку на тестовой выборке задачи B и число обучаемых параметров.
+The toy is built so that the right answer is known.
 
-Запуск:
+- **Pretrained model:** a random MLP $32 \to 128 \to 128 \to 8$ (`teacher_a`), with outputs scaled to unit variance. We skip pretraining and use this network itself as the pretrained model.
+- **Task B:** the same network with a planted update $\Delta W^*$ added to `fc1` and `fc2`. Because the pretrained model *is* task A's network, $\Delta W^*$ is exactly the update adaptation needs.
+- **Two versions of task B**, same Frobenius norm $\lVert \Delta W^* \rVert_F = 3$: a **rank-4** shift (LoRA's hypothesis holds) and a **full-rank** shift (it does not, a negative control).
+- **Adaptation:** 1000 training examples, 600 Adam steps. Full fine-tuning vs LoRA $r \in \{1, 4, 8\}$ on `fc1` and `fc2`.
+- **Fair comparison:** every method gets its own learning rate, picked from a 3-value grid on a separate validation set. The test set is used only once. Results are mean ± std over 3 training seeds (init of $A$ and batch order; the data is fixed).
 
 ```bash
 pip install -r requirements.txt
@@ -71,72 +74,88 @@ python main.py          # tests + experiment + assets/results.png
 python main.py --test   # tests only
 ```
 
-Фактический вывод (CPU, Windows, PyTorch 2.14.1, Python 3.14):
+Output (Linux, 2 CPU cores, Python 3.13, PyTorch 2.14.1; `python main.py` takes 39 s wall time, tests included):
 
 ```
-tests passed (overfit loss 1.4e-13)
-method              trainable params    test MSE
-no adaptation                      0      0.3881
-full fine-tuning               21768      0.0593
-LoRA r=1                         416      0.1888
-LoRA r=2                         832      0.1228
-LoRA r=4                        1664      0.0908
-LoRA r=8                        3328      0.0854
-total time 8.3s
+tests passed (overfit loss 3.2e-13)
+
+test MSE, mean ± std over 3 seeds, lr picked on a validation set
+method              params      lr      rank-4 shift   full-rank shift
+no adaptation            0       -     0.8478 ± 0.0000     0.4968 ± 0.0000
+full fine-tuning     21768   1e-03     0.0234 ± 0.0001     0.0217 ± 0.0001
+LoRA r=1               416   3e-03     0.3033 ± 0.0033     0.2312 ± 0.0029
+LoRA r=4              1664   1e-02     0.0007 ± 0.0002     0.1220 ± 0.0029
+LoRA r=8              3328   1e-02     0.0018 ± 0.0003     0.0648 ± 0.0048
+
+rank-4 shift, fc1: does the learned ΔW find the planted ΔW*?
+method             rel. error   φ(ΔW, ΔW*)   top singular values
+full fine-tuning        0.719        0.966   0.94 0.76 0.67 0.55 0.29 0.27
+LoRA r=1                1.196        0.494   2.71 0.00 0.00 0.00 0.00 0.00
+LoRA r=4                0.036        1.000   1.98 1.58 1.28 0.92 0.00 0.00
+LoRA r=8                0.078        0.999   1.94 1.58 1.27 0.91 0.09 0.08
+planted ΔW*                                  1.98 1.59 1.29 0.93 0.00 0.00
+
+total time 33.9s
 saved results.png
 ```
 
-Общее время `python main.py`, включая тесты и запуск Python, — 16–18 с (зависит от загрузки машины).
-
 ![LoRA vs full fine-tuning](assets/results.png)
 
-Что видно:
-- LoRA с $r = 4$ (ранг настоящего сдвига) закрывает около 90% разрыва между «без адаптации» (0.388) и полным дообучением (0.059), обучая в 13 раз меньше параметров (1664 против 21768).
-- $r = 1$ явно не хватает: сдвиг имеет ранг 4, и одна пара векторов его не выражает.
-- Дальнейший рост $r$ (с 4 до 8) почти ничего не даёт: дополнительные направления не нужны.
-- Полное дообучение всё же лучше. Оно исправляет и ошибку предобучения на задаче A (около 0.03 MSE), и третий слой, которые LoRA не трогает.
+### What the numbers show
 
-Это игрушечный эксперимент. Он показывает механизм, а **не воспроизводит** результаты статьи на GPT-3, RoBERTa или GPT-2.
+- **When the shift really is low-rank, LoRA r=4 beats full fine-tuning:** test MSE 0.0007 vs 0.0234, with 13× fewer trainable parameters. With 1000 examples, the rank constraint works as a correct prior. Full fine-tuning can move all 21768 parameters, and from 1000 examples it finds a function that fits the training set but generalises worse (seed 0: train MSE 0.003, test 0.023; the targets have no label noise, so this is a generalisation gap, not noise fitting).
+- **When the shift is full-rank, the order flips:** full fine-tuning gets 0.0217, LoRA r=4 gets 0.1220 (5.6× worse) and r=8 gets 0.0648. LoRA is only as good as the low-rank hypothesis. The paper checks that hypothesis empirically for LLMs (§7); it is not guaranteed.
+- **LoRA finds the planted update itself, not just a function that fits.** For r=4, $\Delta W$ of `fc1` is within 3.6% of $\Delta W^*$ (relative Frobenius error), with subspace similarity $\phi = 1.000$, and its singular values match $\Delta W^*$ to two decimals.
+- **The extra directions for r=8 stay small** (0.09 and 0.08 next to 1.94 … 0.91). This is the toy version of the §7.2 finding: the top directions carry the signal and the rest "contain mostly random noises".
+- **Full fine-tuning's `fc1` update points the right way but is too small** ($\phi = 0.966$, singular values about half of $\Delta W^*$, relative error 0.72). It also changes `fc3` and the biases, so it does not need to put the whole change into `fc1`.
+- **r=1 is too small for a rank-4 shift** (0.3033), as expected.
 
-### Тесты (`test()`)
+This is a toy built so that LoRA's hypothesis holds by construction (plus one control where it fails). It shows the mechanism. It does **not** reproduce the paper's GPT-3, RoBERTa or GPT-2 results.
 
-- **формы:** $A \in \mathbb{R}^{r \times k}$, $B \in \mathbb{R}^{d \times r}$, $\Delta W$ того же размера, что $W_0$, выход модели $(N, d_{out})$;
-- **переобучение одного батча:** LoRA с $r = 4$ доводит MSE на 16 примерах до $1.4 \times 10^{-13}$ за 300 шагов;
-- **свойства метода:**
-  - при $B = 0$ выход модели с LoRA в точности равен выходу исходной модели;
-  - обучаются только `A` и `B`, $W_0$ после обучения не меняется (побитово);
-  - $\operatorname{rank}(\Delta W) \le r$;
-  - модель после `merge()` даёт тот же выход, что модель с LoRA (до $10^{-5}$).
+### Tests (`test()`)
 
-## Упрощения
+- **shapes:** $A \in \mathbb{R}^{r \times k}$, $B \in \mathbb{R}^{d \times r}$, $\Delta W$ has the shape of $W_0$, the trainable parameter count is $r(d + k)$ per layer;
+- **overfit one batch:** LoRA r=4 drives MSE on 16 samples to $3 \times 10^{-13}$ in 300 steps;
+- **method properties:**
+  - with $B = 0$ the LoRA model's output is bit-identical to the base model's;
+  - only `A` and `B` are trainable, and $W_0$ is bit-identical after training;
+  - $\operatorname{rank}(\Delta W) = r$ after training;
+  - the merged model gives the same output as the LoRA model (atol $10^{-5}$);
+  - $\phi$ is 1 for a matrix and a rescaled copy of itself, and 0 for orthogonal subspaces.
 
-- **Масштаб и данные.** Вместо трансформера на 175B параметров — MLP на 22K параметров и синтетическая регрессия. Задача B построена так, что настоящий сдвиг имеет ранг 4. В реальных моделях низкий ранг $\Delta W$ — гипотеза, которую авторы проверяют эмпирически (раздел 7).
-- **Куда ставим LoRA.** В статье LoRA ставится на матрицы внимания $W_q, W_v$ (разделы 4.2, 5.1). В MLP внимания нет, поэтому LoRA стоит на двух скрытых линейных слоях. Механизм тот же: замороженный `nn.Linear` плюс $BA$.
-- **Дисперсия $A$.** Статья говорит только «random Gaussian», без дисперсии. *Допущение:* $\sigma = 1/\sqrt{k}$.
-- **$\alpha$.** Статья берёт $\alpha$ равным первому испробованному $r$. *Допущение:* $\alpha = 8$, одинаковое для всех $r$, так что масштаб $\alpha/r$ меняется вместе с $r$, как в статье.
-- **Скорости обучения.** *Допущение:* Adam, lr = $10^{-2}$ для LoRA и $10^{-3}$ для полного дообучения, подобраны вручную для этой игрушки. В приложении D статьи используются AdamW, линейное затухание и warmup.
-- **Смещения (bias)** заморожены, как в статье (раздел 4.2). Третий слой не адаптируется вовсе.
+## Simplifications
 
-## Подводные камни
+- **Scale and data.** A 22K-parameter MLP on synthetic regression instead of 175B-parameter transformers on NLP benchmarks.
+- **No pretraining step.** The pretrained model is the task-A network itself, so the needed update is known exactly. In a real model the "true" $\Delta W$ is unknown, and its low rank is a hypothesis.
+- **Where LoRA goes.** The paper adapts the attention matrices $W_q, W_v$ (§4.2, §5.1). An MLP has no attention, so LoRA wraps the two hidden layers. The mechanism (frozen `nn.Linear` plus $BA$) is the same.
+- **Variance of $A$.** The paper says only "random Gaussian" ($\mathcal{N}(0, \sigma^2)$ in Figure 1). *Assumption:* $\sigma = 1/\sqrt{k}$.
+- **$\alpha$.** *Assumption:* $\alpha = 8$ for every $r$, so $\alpha/r$ changes with $r$ as in the paper.
+- **Optimiser.** Adam with a per-method learning rate from a 3-value grid, 600 steps, no schedule. Appendix D of the paper uses AdamW with warmup and linear decay.
+- **Subspace similarity on $\Delta W$, not on $A$.** The paper compares the $A$ matrices of two runs. We compare against a known $\Delta W^*$, so we use $\Delta W$. For $r=4$ the two are the same subspace (the row space of $BA$ equals that of $A$ when $B$ has full column rank).
+- **Biases** are frozen, as in the paper (§4.2). The third layer is not adapted.
 
-- **$B$ должна быть нулём, а не $A$** (раздел 4.1). Тогда в начале обучения модель совпадает с предобученной. Если обнулить обе, градиенты по обеим будут нулевыми и обучение не начнётся.
-- **Множитель $\alpha/r$ легко потерять:** его нет в уравнении 3, он есть только в тексте (раздел 4.1). Без него при смене $r$ нужно заново подбирать learning rate.
-- **Не держите $BA$ явно при обучении.** Считайте $B(Ax)$: это $O(r(d+k))$ памяти вместо $O(dk)$.
-- **Заморозьте всё остальное:** слои без LoRA, LayerNorm и смещения (раздел 4.2). Передавайте оптимизатору только параметры с `requires_grad=True`, иначе weight decay может испортить замороженные веса.
-- **Слияние ломает батчинг разных задач** (раздел 4.2): после `merge()` в одном батче нельзя смешивать примеры для разных $A, B$. В таком случае держите LoRA-ветку отдельно.
-- **Обозначения в статье непоследовательны:** в разделе 7.2 и Таблице 6 выходная проекция внимания называется $W_c$, а в остальных местах — $W_o$.
+## Gotchas
 
-## Проверь себя
+- **Zero $B$, not $A$** (§4.1). Then the model starts at the pretrained one. If both are zero, the gradient of each is proportional to the other, and training never starts.
+- **The $\alpha/r$ factor is easy to lose.** It is not in Eq. 3, only in the text of §4.1. Without it, changing $r$ means re-tuning the learning rate.
+- **Never form $BA$ during training.** Compute $B(Ax)$: $O(r(d+k))$ memory instead of $O(dk)$.
+- **Freeze everything else:** layers without LoRA, LayerNorm and biases (§4.2). Pass only parameters with `requires_grad=True` to the optimiser, otherwise weight decay can still change frozen weights.
+- **Merging breaks mixed-task batches** (§4.2). After `merge()` you cannot batch inputs for different $A, B$ together. Keep the LoRA branch separate in that case.
+- **Compare against a tuned baseline.** LoRA and full fine-tuning want different learning rates (here 1e-2 vs 1e-3). With one shared learning rate, one of them is handicapped, and the comparison says more about the learning rate than about the method.
+- **The paper is inconsistent about which singular vectors $\phi$ uses.** §7.2 says "right-singular unitary matrices" of $A$; Appendix G says "left singular matrices". For $A \in \mathbb{R}^{r \times k}$ only the right singular vectors (in $\mathbb{R}^k$) give a meaningful subspace; the left ones are $r \times r$ and span all of $\mathbb{R}^r$. The code uses right singular vectors.
+- **Notation drift:** §7.2 and Table 6 call the attention output projection $W_c$; the rest of the paper calls it $W_o$.
 
-1. Почему инициализируют нулём именно $B$, а не обе матрицы?
-2. Сколько обучаемых параметров у LoRA для одного слоя $1024 \times 4096$ при $r = 8$, и во сколько раз это меньше, чем у полного слоя?
-3. Почему LoRA не добавляет задержку при выводе, а адаптеры добавляют?
+## Check yourself
+
+1. Why is $B$ initialised to zero rather than both matrices?
+2. How many trainable parameters does LoRA add to one $1024 \times 4096$ layer with $r = 8$, and how many times fewer is that than the full layer?
+3. In the toy, LoRA r=4 beats full fine-tuning on the rank-4 shift but loses on the full-rank shift with the same norm. What does that tell you about when LoRA should work on a real model?
 
 <details>
-<summary>Ответы</summary>
+<summary>Answers</summary>
 
-1. Нужно, чтобы $\Delta W = BA = 0$ в начале, то есть модель стартовала из предобученной. Достаточно одного нуля. Если обнулить обе матрицы, градиент по $A$ пропорционален $B$, градиент по $B$ пропорционален $A$, и оба навсегда останутся нулями.
-2. $r(d + k) = 8 \cdot (1024 + 4096) = 40\,960$ против $1024 \cdot 4096 = 4\,194\,304$, примерно в 102 раза меньше.
-3. $BA$ — матрица того же размера, что $W_0$, её можно прибавить к весам один раз: $W = W_0 + \frac{\alpha}{r}BA$. Адаптеры — дополнительные последовательные слои, их нельзя «влить» в существующие веса.
+1. We need $\Delta W = BA = 0$ at the start, so the model starts at the pretrained one. One zero matrix is enough. If both are zero, the gradient with respect to $A$ is proportional to $B$ and vice versa, so both stay zero forever.
+2. $r(d + k) = 8 \cdot (1024 + 4096) = 40\,960$ vs $1024 \cdot 4096 = 4\,194\,304$, about 102× fewer.
+3. LoRA restricts the update to rank $r$. That restriction helps (less variance, fewer parameters) when the update the task needs is close to low-rank, and costs accuracy when it is not, whatever the norm of the change. On a real model this is an empirical question about the task and the layer, which is what §7 of the paper measures.
 
 </details>
