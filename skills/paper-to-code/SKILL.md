@@ -23,6 +23,8 @@ The goal is understanding, not a full reproduction. Small, correct and readable 
 
 - If the user gives an arXiv link or ID, read the full text: try the HTML version (`https://arxiv.org/html/<id>`) first, then the PDF (`https://arxiv.org/pdf/<id>`), and use the abstract page (`https://arxiv.org/abs/<id>`) for the title, authors and date.
 - If the user attaches a PDF, read all of it, including the appendix. Training details, initialization and tricks often live only in the appendix.
+- Long papers often come back truncated. If the text stops before the end, fetch the rest (the PDF pages or the HTML sections you missed) before you continue. If some part still cannot be read, name it in the breakdown header and say whether it matters for the implementation.
+- Note which arXiv version you read. Papers change between versions.
 - If you cannot access the paper, say so and ask the user to attach the PDF. Never reconstruct a paper from its title or from memory.
 
 ## Step 2. Find the core
@@ -37,7 +39,9 @@ If the paper has several equally important contributions, implement the main one
 
 ## Step 3. Write the breakdown
 
-Use this structure and these headings (translated into the user's language):
+Use this structure and these headings (translated into the user's language).
+
+Start with a header block before the first heading: the paper title, authors, arXiv link, the version you read, and any part you could not read.
 
 ### TL;DR
 Two or three sentences: what problem, what idea, what result.
@@ -59,13 +63,13 @@ Only the equations needed to implement the method, usually two to five. For each
 A numbered walkthrough of one forward pass (and the training step, if the idea is in training).
 
 ### Implementation
-The code (see Step 4), followed by how to run it and what output to expect.
+The code (see Step 4), followed by how to run it and the output you actually got (copied from the run, with the PyTorch version and the total time). Then two or three bullets on what the numbers show, and a one-line reminder that a toy run is not a reproduction of the paper's results.
 
 ### Simplifications
 What the code does differently from the paper and why (smaller scale, synthetic data, skipped tricks). Be explicit.
 
 ### Gotchas
-Details from the paper that are easy to miss and break the method if ignored: initialization, normalization placement, hyperparameters, masking, numerical stability tricks. Cite where in the paper each one is.
+Details from the paper that are easy to miss and break the method if ignored: initialization, normalization placement, hyperparameters, masking, numerical stability tricks. Cite where in the paper each one is. If you hit a bug while writing the code that a reader would likely hit too, add it here with its symptom (e.g. "initial loss 46 instead of 2.4").
 
 ### Check yourself
 Three short questions that test whether the user really understood the idea, with answers hidden in a collapsible `<details>` block or placed at the very end.
@@ -74,10 +78,18 @@ Three short questions that test whether the user really understood the idea, wit
 
 ### Scope
 - One file, `main.py`, unless the user asks for more. Only `torch`, `numpy` and the standard library unless the method truly needs something else.
-- Runs on CPU in under about a minute. Use `cuda` if available, but never require it.
+- Matplotlib is the one optional exception, and only for saving `assets/results.png`. Import it inside the plot function and skip the plot with a printed note if it is missing, so `main.py` still runs with torch alone. Mark it as optional in `requirements.txt`.
+- The whole `python main.py`, tests included, runs on CPU in under about a minute. Measure it and print the training time. If it is too slow, shrink the model or the step count, not the idea. Use `cuda` if available, but never require it.
 - Uses synthetic or tiny built-in data so it runs with zero downloads.
 - Fixes the random seed.
 - Ends with a short demo in `if __name__ == "__main__":` that trains or runs the method and prints something meaningful (loss going down, a comparison to the baseline, a sample output).
+
+### Make the toy setting informative
+A demo can run without errors and still show nothing. Before you trust the numbers:
+- Scale synthetic targets to unit variance, so losses are readable and a "no method" baseline is clearly worse.
+- Design the data so the paper's claim can show up, and also fail. For example, plant a known structure (a rank-4 shift for a low-rank method) and include a setting that should do worse (rank 1).
+- Check the loss at step 0. For classification it should be close to $\ln(\text{num classes})$. If it is far off, look for an initialization or scaling bug before you tune anything else.
+- If the paper leaves an initialization unspecified, pick one that keeps activations at unit scale, and mark it as an assumption.
 
 ### Style
 - Name variables and functions after the paper's notation where it helps (`q`, `k`, `v`, `alpha`, `beta`), otherwise use clear English names.
@@ -99,12 +111,13 @@ for step in range(steps):
 ```
 
 - No docstrings, no section banners, no comments that restate what the code says (`# loop over epochs`, `# return the result`).
-- Never write comments that start with a capital letter.
+- Never write comments that start with a capital letter. This includes paper symbols that are capitals: write `#zero B, so the model starts at W0`, not `#B is zero ...`.
+- As a rough guide, about one comment per 20–30 lines of code. Before you finish, grep the file for comments and delete any that the code already says.
 
 ### Tests
-Include a small `test()` function (called from `__main__` or run with `python main.py --test` only if trivial) that checks at least:
+Include a small `test()` function. Call it at the start of `__main__`, and make `python main.py --test` run only the tests and exit. It checks at least:
 - output shapes are what the equations say;
-- the model can overfit a single tiny batch (loss drops close to zero), when the method involves training;
+- the model can overfit a single tiny batch (loss drops close to zero), when the method involves training. Turn off regularizers that set a floor on the loss (dropout, label smoothing, weight decay) in this test only;
 - one property specific to the method (e.g. attention weights sum to 1, the loss is invariant to something the paper says it should be, the output matches a naive reference implementation).
 
 ## Step 5. Verify before answering
@@ -112,6 +125,21 @@ Include a small `test()` function (called from `__main__` or run with `python ma
 - If you can execute code in this environment, run `main.py` and the tests. Fix anything that fails. Report what you actually observed (final loss, test results, run time).
 - If you cannot run code, say clearly that the code is untested.
 - Never claim to have reproduced the paper's reported numbers. A toy run shows the mechanism works, not that the paper's results hold.
+- Re-run after your last code change, and copy the output into the breakdown from that final run, not an earlier one.
+- Check every number in the prose of the breakdown (percentages, ratios, "X times fewer parameters") against the run output.
+
+### Saving to files
+When you work in a folder, or the user asks for files, save the result as one directory per paper:
+
+```
+<short-name>/
+├── breakdown.md        # the breakdown from Step 3, linking to main.py and the image
+├── main.py
+├── requirements.txt    # torch, plus matplotlib marked optional
+└── assets/results.png  # written by main.py itself, never drawn by hand
+```
+
+`main.py` writes the image to a path relative to its own file (`Path(__file__).parent / "assets"`), not to the current directory.
 
 ## Step 6. Publishing to GitHub
 
@@ -131,7 +159,12 @@ Only when the user asks to publish, push or "выложить в гитхаб". 
 └── .gitignore            # python template: __pycache__, .venv, *.pt, data/
 ```
 
-Generate `assets/results.png` by running the code (matplotlib, clean style, labeled axes, readable on light and dark backgrounds). If the code cannot be run, leave out the image rather than drawing a fake one.
+Generate `assets/results.png` by running the code. If the code cannot be run, leave out the image rather than drawing a fake one. The image must be readable on both GitHub's light and dark themes:
+- save with `transparent=True`;
+- use one mid-gray for all text, ticks and spines (e.g. `#8a8a86`), and set ticks with `tick_params(which="both", ...)`, otherwise minor tick labels on log axes stay black;
+- use saturated series colors in a fixed order (e.g. `#2a78d6`, `#eb6834`, `#1baf7a`), at most four series, with a legend and a direct label at each line's end;
+- never put two y-scales on one axis; use two side-by-side subplots instead;
+- open the PNG and look at it before you commit it.
 
 ### README
 
