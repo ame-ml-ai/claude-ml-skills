@@ -15,9 +15,11 @@ bos = n_symbols
 vocab = n_symbols + 1
 
 
-def attention(q, k, v, mask=None):
+def attention(q, k, v, mask=None, scale=True):
     d_k = q.size(-1)
-    scores = q @ k.transpose(-2, -1) / math.sqrt(d_k)
+    scores = q @ k.transpose(-2, -1)
+    if scale:
+        scores = scores / math.sqrt(d_k)
     if mask is not None:
         scores = scores.masked_fill(~mask, float("-inf"))
     weights = scores.softmax(dim=-1)
@@ -28,7 +30,8 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, h):
         super().__init__()
         self.h, self.d_k = h, d_model // h
-        #all h heads in one matrix: columns i*d_k:(i+1)*d_k are W_i^Q
+        self.scale = True
+        # all h heads in one matrix: columns i*d_k:(i+1)*d_k are W_i^Q
         self.w_q = nn.Linear(d_model, d_model, bias=False)
         self.w_k = nn.Linear(d_model, d_model, bias=False)
         self.w_v = nn.Linear(d_model, d_model, bias=False)
@@ -40,8 +43,8 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, q, k, v, mask=None):
         q, k, v = self.split(self.w_q(q)), self.split(self.w_k(k)), self.split(self.w_v(v))
-        #(B, h, T_q, d_k)
-        heads, self.weights = attention(q, k, v, mask)
+        # (B, h, T_q, d_k)
+        heads, self.weights = attention(q, k, v, mask, self.scale)
         b, _, t, _ = heads.shape
         return self.w_o(heads.transpose(1, 2).reshape(b, t, self.h * self.d_k))
 
@@ -65,7 +68,7 @@ class EncoderLayer(nn.Module):
         self.drop = nn.Dropout(p_drop)
 
     def forward(self, x, src_mask):
-        #post-ln: LayerNorm(x + Sublayer(x))
+        # post-ln: LayerNorm(x + Sublayer(x))
         x = self.norm1(x + self.drop(self.self_attn(x, x, x, src_mask)))
         return self.norm2(x + self.drop(self.ffn(x)))
 
@@ -81,7 +84,7 @@ class DecoderLayer(nn.Module):
 
     def forward(self, y, memory, tgt_mask):
         y = self.norm1(y + self.drop(self.self_attn(y, y, y, tgt_mask)))
-        #queries from the decoder, keys and values from the encoder
+        # queries from the decoder, keys and values from the encoder
         y = self.norm2(y + self.drop(self.cross_attn(y, memory, memory)))
         return self.norm3(y + self.drop(self.ffn(y)))
 
@@ -104,8 +107,9 @@ class Transformer(nn.Module):
     def __init__(self, vocab, d_model=64, h=4, d_ff=128, n_layers=2, p_drop=0.1, max_len=64):
         super().__init__()
         self.d_model = d_model
+        self.use_pe = True
         self.embed = nn.Embedding(vocab, d_model)
-        #std d_model^-0.5: scaled inputs are unit size, tied logits start small
+        # std d_model^-0.5: scaled inputs are unit size, tied logits start small
         nn.init.normal_(self.embed.weight, std=d_model ** -0.5)
         self.register_buffer("pe", positional_encoding(max_len, d_model))
         self.drop = nn.Dropout(p_drop)
@@ -114,7 +118,9 @@ class Transformer(nn.Module):
 
     def embed_tokens(self, tokens):
         x = self.embed(tokens) * math.sqrt(self.d_model)
-        return self.drop(x + self.pe[: tokens.size(1)])
+        if self.use_pe:
+            x = x + self.pe[: tokens.size(1)]
+        return self.drop(x)
 
     def encode(self, src):
         x = self.embed_tokens(src)
@@ -127,7 +133,7 @@ class Transformer(nn.Module):
         mask = causal_mask(tgt_in.size(1))
         for layer in self.decoder:
             y = layer(y, memory, mask)
-        #pre-softmax linear shares weights with the embedding
+        # pre-softmax linear shares weights with the embedding
         return y @ self.embed.weight.T
 
     def forward(self, src, tgt_in):
@@ -142,7 +148,7 @@ def lrate(step, d_model, warmup_steps):
 def make_batch(n):
     src = torch.randint(0, n_symbols, (n, seq_len), device=device)
     tgt = src.flip(1)
-    #decoder input is the target shifted right by one
+    # decoder input is the target shifted right by one
     tgt_in = torch.cat([torch.full((n, 1), bos, device=device), tgt[:, :-1]], dim=1)
     return src, tgt_in, tgt
 
@@ -159,10 +165,10 @@ def greedy_decode(model, src):
 
 def train(model, steps, warmup_steps, batch=64, eps_ls=0.1):
     opt = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
-    #lr=1.0 times the lambda gives exactly Eq. 3
+    # lr=1.0 times the lambda gives exactly Eq. 3
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lrate(s + 1, model.d_model, warmup_steps))
     curve = []
-    for step in range(steps):
+    for _ in range(steps):
         src, tgt_in, tgt = make_batch(batch)
         logits = model(src, tgt_in)
         loss = F.cross_entropy(logits.reshape(-1, vocab), tgt.reshape(-1), label_smoothing=eps_ls)
@@ -186,7 +192,7 @@ def test():
     mha = MultiHeadAttention(d_model, h).to(device)
     assert mha(q, k, v).shape == (b, t, d_model)
 
-    #reference: Concat(head_1..head_h) W^O with an explicit loop over heads
+    # reference: Concat(head_1..head_h) W^O with an explicit loop over heads
     d_k = d_model // h
     heads = []
     for i in range(h):
@@ -205,7 +211,7 @@ def test():
     logits = model(src, tgt_in)
     assert logits.shape == (4, seq_len, vocab)
 
-    #changing future decoder inputs must not change earlier outputs
+    # changing future decoder inputs must not change earlier outputs
     changed = tgt_in.clone()
     changed[:, 5:] = (changed[:, 5:] + 1) % n_symbols
     assert torch.allclose(model(src, changed)[:, :5], logits[:, :5], atol=1e-5)
@@ -231,7 +237,40 @@ def softmax_saturation(d_k, n=2000):
     return unscaled, scaled
 
 
-def plot(curve, warmup_steps, d_model, path):
+def reversal_attention(model, src, tgt_in):
+    # mass that target position i puts on source position T-1-i, per layer and head
+    model.eval()
+    with torch.no_grad():
+        model(src, tgt_in)
+    t = src.size(1)
+    mirror = torch.arange(t - 1, -1, -1, device=src.device)
+    rows = torch.arange(t, device=src.device)
+    return torch.stack([layer.cross_attn.weights[:, :, rows, mirror].mean((0, 2)) for layer in model.decoder])
+
+
+def accuracy(model, n=1000):
+    model.eval()
+    src, _, tgt = make_batch(n)
+    pred = greedy_decode(model, src)
+    return (pred == tgt).float().mean().item(), (pred == tgt).all(1).float().mean().item()
+
+
+def ablation(change, steps, warmup_steps):
+    torch.manual_seed(0)
+    model = Transformer(vocab).to(device)
+    if change == "no positional encoding":
+        model.use_pe = False
+    if change == "no 1/sqrt(d_k)":
+        for m in model.modules():
+            if isinstance(m, MultiHeadAttention):
+                m.scale = False
+    if change == "no warmup":
+        warmup_steps = 1
+    curve = train(model, steps, warmup_steps)
+    return accuracy(model), curve[-1]
+
+
+def plot(curve, attn, path):
     try:
         import matplotlib
     except ImportError:
@@ -243,23 +282,31 @@ def plot(curve, warmup_steps, d_model, path):
     ink = "#8a8a86"
     window = 25
     smooth = [sum(curve[max(0, i - window):i + 1]) / len(curve[max(0, i - window):i + 1]) for i in range(len(curve))]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 3.6), dpi=150)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 3.8), dpi=150, gridspec_kw={"width_ratios": [1.4, 1]})
     ax1.plot(smooth, color="#2a78d6", lw=2)
+    ax1.axhline(math.log(n_symbols), color=ink, lw=1, ls="--")
+    ax1.annotate("ln 10, uniform guess", (len(curve), math.log(n_symbols)), xytext=(-4, 4),
+                 textcoords="offset points", ha="right", color=ink, fontsize=8)
     ax1.set_title("training loss (label smoothing 0.1)", color=ink, fontsize=10)
     ax1.set_xlabel("step", color=ink)
     ax1.set_ylabel("cross-entropy", color=ink)
-    steps = range(1, len(curve) + 1)
-    ax2.plot(steps, [lrate(s, d_model, warmup_steps) for s in steps], color="#eb6834", lw=2)
-    ax2.set_title(f"learning rate, Eq. 3 (warmup {warmup_steps})", color=ink, fontsize=10)
-    ax2.set_xlabel("step", color=ink)
-    ax2.set_ylabel("lrate", color=ink)
+    ax1.grid(axis="y", color=ink, alpha=0.2)
+    for side in ("top", "right"):
+        ax1.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax1.spines[side].set_color(ink)
+
+    im = ax2.imshow(attn.cpu(), cmap="Blues", vmin=0, vmax=1)
+    ax2.set_title("cross-attention, last decoder layer", color=ink, fontsize=10)
+    ax2.set_xlabel("source position", color=ink)
+    ax2.set_ylabel("target position", color=ink)
+    cbar = fig.colorbar(im, ax=ax2, fraction=0.046)
+    cbar.ax.tick_params(colors=ink)
+    cbar.outline.set_edgecolor(ink)
+    for spine in ax2.spines.values():
+        spine.set_color(ink)
     for ax in (ax1, ax2):
         ax.tick_params(which="both", colors=ink)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color(ink)
-        ax.grid(axis="y", color=ink, alpha=0.2)
     fig.suptitle("Transformer learning to reverse sequences", color=ink)
     fig.tight_layout()
     path.parent.mkdir(exist_ok=True)
@@ -277,16 +324,34 @@ if __name__ == "__main__":
         unscaled, scaled = softmax_saturation(d_k)
         print(f"d_k={d_k:<3} mean max attention weight: unscaled {unscaled:.2f}, scaled {scaled:.2f}")
 
+    torch.manual_seed(0)
     model = Transformer(vocab).to(device)
     warmup_steps, steps = 200, 1000
     curve = train(model, steps, warmup_steps)
-    print(f"params {sum(p.numel() for p in model.parameters())}, final train loss {curve[-1]:.3f}")
+    print(f"params {sum(p.numel() for p in model.parameters())}, "
+          f"loss at step 1 {curve[0]:.2f} (ln {vocab} = {math.log(vocab):.2f}), final train loss {curve[-1]:.3f}")
 
-    model.eval()
-    src, _, tgt = make_batch(1000)
-    pred = greedy_decode(model, src)
-    print(f"test: token accuracy {(pred == tgt).float().mean():.3f}, "
-          f"sequence accuracy {(pred == tgt).all(1).float().mean():.3f}")
-    print(f"example: {src[0].tolist()} -> {pred[0].tolist()}")
+    token_acc, seq_acc = accuracy(model)
+    print(f"test: token accuracy {token_acc:.3f}, sequence accuracy {seq_acc:.3f}")
+    src, tgt_in, _ = make_batch(1)
+    print(f"example: {src[0].tolist()} -> {greedy_decode(model, src)[0].tolist()}")
+
+    src, tgt_in, _ = make_batch(500)
+    mass = reversal_attention(model, src, tgt_in)
+    for layer, heads in enumerate(mass):
+        print(f"decoder layer {layer + 1} cross-attention on the mirrored source position, per head: "
+              + " ".join(f"{m:.2f}" for m in heads.tolist()) + f" (uniform = {1 / seq_len:.2f})")
+    with torch.no_grad():
+        model(src[:1], tgt_in[:1])
+    last = model.decoder[-1].cross_attn.weights[0]
+    best_head = mass[-1].argmax()
     print(f"total time {time.time() - start:.1f}s")
-    plot(curve, warmup_steps, model.d_model, Path(__file__).parent / "assets" / "results.png")
+    plot(curve, last[best_head], Path(__file__).parent / "assets" / "results.png")
+
+    if "--ablate" in sys.argv:
+        print(f"\nablations, {steps} steps each, same seed")
+        print(f"{'change':<24}{'token acc':>10}{'seq acc':>9}{'final loss':>12}")
+        print(f"{'none':<24}{token_acc:>10.3f}{seq_acc:>9.3f}{curve[-1]:>12.3f}")
+        for change in ("no positional encoding", "no 1/sqrt(d_k)", "no warmup"):
+            (tok, seq), loss = ablation(change, steps, warmup_steps)
+            print(f"{change:<24}{tok:>10.3f}{seq:>9.3f}{loss:>12.3f}")
